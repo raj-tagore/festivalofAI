@@ -1,5 +1,7 @@
 import cv2
 import numpy as np
+import socket
+import time
 
 class Node:
     def __init__(self, maze_coordinates):
@@ -82,7 +84,7 @@ class Plan:
 
 class Display:
     def __init__(self, frame, maze):
-        self.cell_size = int(frame.shape[0]/13)
+        self.cell_size = int(frame.shape[0]/11)
         self.start_coordinates = (int(frame.shape[1]/2 - len(maze.binary[0]) * self.cell_size/2), int(frame.shape[0]/2 - len(maze.binary) * self.cell_size/2))
         
     def draw_maze(self, frame, maze):
@@ -102,7 +104,7 @@ class Display:
                     cv2.line(frame, (x, y), (x, y + self.cell_size), (0, 255, 255), 2)
                     
     # detects the aruco markers and sets the start and goal nodes
-    def detect_aruco_markers(self, frame, maze, plan):
+    def detect_aruco_markers(self, frame, maze, plan, bot):
         dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         parameters =  cv2.aruco.DetectorParameters()
         detector = cv2.aruco.ArucoDetector(dictionary, parameters)
@@ -121,6 +123,7 @@ class Display:
                 u=9 if u>9 else u
                 v=9 if v>9 else v
                 if marker_id[0] == 0:
+                    bot.update_bot_status(center, angle)
                     plan.start = maze.nodes[v][u]    
                 if marker_id[0] == 1:
                     plan.goal = maze.nodes[v][u]
@@ -131,25 +134,68 @@ class Display:
             cv2.line(frame, plan.path[i].pixel_coordinates, plan.path[i + 1].pixel_coordinates, (0, 255, 0), 2)
         return frame
     
+class Bot:
+    def __init__(self):
+        self.position = None
+        self.angle = None
+        
+        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        esp_ip = '192.168.188.116'  # IP of the ESP32
+        port = 80
+        self.s.connect((esp_ip, port))
 
+    def send_to_esp32(self, message):
+        message += '\n'
+        self.s.sendall(message.encode())
+
+    def send_movement_commands(self, plan):
+            if len(plan.path) < 3:
+                print("Game Over")
+                return
+            if self.position is None or self.angle is None:
+                return
+            else:
+                next_destination = plan.path[1].pixel_coordinates
+                target_angle = np.arctan2(next_destination[1] - self.position[1], next_destination[0] - self.position[0]) * 180/np.pi
+                angle_difference = target_angle - self.angle
+                if angle_difference < -180:
+                    angle_difference += 360
+                elif angle_difference > 180:
+                    angle_difference -= 360
+                if abs(angle_difference) < 10:
+                    move_command = "forward"
+                elif angle_difference < 0:
+                    move_command = "left"
+                else:
+                    move_command = "right"
+                self.send_to_esp32(move_command)
+                print(f"bot angle: {self.angle}, target_angle: {target_angle}, Sent {move_command}")
+                time.sleep(0.5)  
+
+    def update_bot_status(self, position, angle):
+        self.position = position
+        self.angle = angle
+    
 if __name__ == "__main__":
     
-    cap = cv2.VideoCapture(1)
+    cap = cv2.VideoCapture(2)
     
     maze = Maze()
     plan = Plan(maze)
+    bot = Bot()
     
     while True:
-        ret, frame = cap.read()
+        ret, frame_rotated = cap.read()
+        frame = cv2.rotate(frame_rotated, cv2.ROTATE_180)
         if not ret:
             break
 
         display = Display(frame, maze)
-        display.detect_aruco_markers(frame, maze, plan)
+        display.detect_aruco_markers(frame, maze, plan, bot)
         display.draw_maze(frame, maze)
         plan.update_path()
         display.draw_path(frame, plan)
-        
+        bot.send_movement_commands(plan)
         cv2.imshow("Video Feed", frame)
         if cv2.waitKey(1) == ord('q'):
             breakpoint
